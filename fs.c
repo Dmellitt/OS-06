@@ -208,7 +208,36 @@ int fs_mount()
 
 int fs_create()
 {
-    
+    union fs_block block;
+
+    disk_read(0, block.data);
+    int ninodeblocks = block.super.ninodeblocks;
+
+    int i;
+
+    for (i = 1; i <= ninodeblocks; i++) {
+      disk_read(i, block.data);
+      printf("i is %d\n", i);
+      int j=0;
+      if (i ==1) {
+        j = 1;
+      }
+      for(; j < INODES_PER_BLOCK; j++) {
+        printf("j is %d\n", j);
+        if (!block.inodes[j].isvalid) {
+          struct fs_inode inode;
+          inode.size = 0;
+          inode.isvalid = 1; 
+          inode.indirect = 0;
+          int k;
+          for(k = 0; k < POINTERS_PER_INODE; k++) {
+            inode.direct[k] = 0;
+          }
+          inode_save((j+((i-1)*INODES_PER_BLOCK)), &inode);
+          return (j+((i-1)*INODES_PER_BLOCK)); 
+        }
+      }
+    }   
     return 0;
 }
 
