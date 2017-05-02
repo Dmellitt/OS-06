@@ -44,8 +44,9 @@ void inode_load( int inumber, struct fs_inode *inode )
     // get block of inodes, add 1 to skip superblock
 	disk_read(inumber/INODES_PER_BLOCK+1, block.data); 
 
+    
     // set pointer to requested inode
-    inode = block.inodes+inumber%INODES_PER_BLOCK;
+    *inode = block.inodes[inumber%INODES_PER_BLOCK];
 }
 
 void inode_save( int inumber, struct fs_inode *inode )
@@ -79,7 +80,7 @@ int fs_format()
     
     // destroy data
     for(i=1;i<disk_size();i++)
-	    disk_write(i,block.data);
+        disk_write(i,block.data);
 
     // write super block
     block.super.magic = FS_MAGIC;
@@ -89,7 +90,7 @@ int fs_format()
 
     disk_write(0,block.data);
         
-	return 1;
+    return 1;
 }
 
 void fs_debug()
@@ -110,9 +111,9 @@ void fs_debug()
     }
     else
         printf("    magic number is valid\n");
-	printf("    %d blocks on disk\n",block.super.nblocks);
-	printf("    %d blocks for inodes\n",block.super.ninodeblocks);
-	printf("    %d inodes total\n",block.super.ninodes);
+    printf("    %d blocks on disk\n",block.super.nblocks);
+    printf("    %d blocks for inodes\n",block.super.ninodeblocks);
+    printf("    %d inodes total\n",block.super.ninodes);
 
     // inodes
     int i;
@@ -207,25 +208,35 @@ int fs_mount()
 
 int fs_create()
 {
-	return 0;
+    
+    return 0;
 }
 
 int fs_delete( int inumber )
 {
-	return 0;
+    return 0;
 }
 
 int fs_getsize( int inumber )
 {
-	return -1;
+    struct fs_inode inode;
+
+    inode_load( inumber, &inode );
+
+    if( !inode.isvalid ){
+        printf("Error: invalid inode\n");
+        return -1;
+    }
+
+    return inode.size;
 }
 
 int fs_read( int inumber, char *data, int length, int offset )
 {
-	return 0;
+    return 0;
 }
 
 int fs_write( int inumber, const char *data, int length, int offset )
 {
-	return 0;
+    return 0;
 }
