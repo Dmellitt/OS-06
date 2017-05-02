@@ -37,6 +37,31 @@ union fs_block {
 	char data[DISK_BLOCK_SIZE];
 };
 
+void inode_load( int inumber, struct fs_inode *inode ) 
+{ 
+	union fs_block block;
+
+    // get block of inodes, add 1 to skip superblock
+	disk_read(inumber/INODES_PER_BLOCK+1, block.data); 
+
+    // set pointer to requested inode
+    inode = block.inodes+inumber%INODES_PER_BLOCK;
+}
+
+void inode_save( int inumber, struct fs_inode *inode )
+{
+	union fs_block block;
+    
+    // get block of inodes, add 1 to skip superblock
+	disk_read(inumber/INODES_PER_BLOCK+1, block.data); 
+
+    // set requested inode to given inode
+    block.inodes[inumber%INODES_PER_BLOCK] = *inode;
+
+    // update block
+	disk_write(inumber/INODES_PER_BLOCK+1, block.data); 
+}
+
 int fs_format()
 {
     // check for block bitmap
