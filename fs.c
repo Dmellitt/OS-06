@@ -217,13 +217,13 @@ int fs_create()
 
     for (i = 1; i <= ninodeblocks; i++) {
       disk_read(i, block.data);
-      printf("i is %d\n", i);
+//      printf("i is %d\n", i);
       int j=0;
       if (i ==1) {
         j = 1;
       }
       for(; j < INODES_PER_BLOCK; j++) {
-        printf("j is %d\n", j);
+  //      printf("j is %d\n", j);
         if (!block.inodes[j].isvalid) {
           struct fs_inode inode;
           inode.size = 0;
@@ -243,7 +243,29 @@ int fs_create()
 
 int fs_delete( int inumber )
 {
-    return 0;
+  // access the inode
+  union fs_block block;
+  struct fs_inode inode;
+  inode_load(inumber, &inode);
+
+  // printf("isvalid %d\n", inode.isvalid); // should be one if the inode exists
+
+  if (inode.isvalid) {
+    // release the data
+    inode.size = 0;
+    inode.isvalid = 0;
+    int k;
+    for(k = 0; k < POINTERS_PER_INODE; k++) {
+      inode.direct[k] = 0;
+    }
+    inode.indirect = 0;
+
+    inode_save(inumber, &inode);
+    // free on the map (ie make available)  
+    map[inumber] = 0; 
+    return 1;
+  } 
+  return 0;
 }
 
 int fs_getsize( int inumber )
