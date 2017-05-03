@@ -63,6 +63,18 @@ void inode_save( int inumber, struct fs_inode *inode )
 	disk_write(inumber/INODES_PER_BLOCK+1, block.data); 
 }
 
+int valid_inumber( int inumber ) 
+{
+	union fs_block block;
+
+	disk_read(0,block.data); 
+
+    if( inumber >= block.super.ninodes )
+        return 0;
+
+    return 1;
+}
+
 int fs_format()
 {
     // check for block bitmap
@@ -73,33 +85,29 @@ int fs_format()
     
 	union fs_block block;
 
-    // create empty block
-    int i;
-    for(i=0;i<DISK_BLOCK_SIZE;i++)
-        block.data[i] = 0;
-    
-    // destroy data
-    for(i=1;i<disk_size();i++)
-        disk_write(i,block.data);
-
     // write super block
     block.super.magic = FS_MAGIC;
     block.super.nblocks = disk_size();
     block.super.ninodeblocks = (disk_size()+9)/10;
     block.super.ninodes = block.super.ninodeblocks*INODES_PER_BLOCK;
-
     disk_write(0,block.data);
+
+    int ninodeblocks = block.super.ninodeblocks;
         
+    // create empty block
+    int i;
+    for(i=0;i<DISK_BLOCK_SIZE;i++)
+        block.data[i] = 0;
+    
+    // clear inodes
+    for(i=1;i<=ninodeblocks;i++)
+        disk_write(i,block.data);
+
     return 1;
 }
 
 void fs_debug()
 {
-    if(!map){
-        printf("Error: no mounted disk.\n");
-        return;
-    }
-
 	union fs_block block;
 
 	disk_read(0,block.data);
@@ -156,8 +164,8 @@ int fs_mount()
 {
 	union fs_block block;
     if(map){
-        printf("Error: disk already mounted\n");
-        return 0;
+        free(map);
+        map = 0;
     }
 
 	disk_read(0,block.data);
@@ -208,6 +216,11 @@ int fs_mount()
 
 int fs_create()
 {
+    if(!map){
+        printf("Error: no mounted disk\n");
+        return 0;
+    }
+
     union fs_block block;
 
     disk_read(0, block.data);
@@ -217,13 +230,14 @@ int fs_create()
 
     for (i = 1; i <= ninodeblocks; i++) {
       disk_read(i, block.data);
-//      printf("i is %d\n", i);
+
+      // skip inode 0
       int j=0;
       if (i ==1) {
         j = 1;
       }
       for(; j < INODES_PER_BLOCK; j++) {
-  //      printf("j is %d\n", j);
+        //find invalid inode to replace
         if (!block.inodes[j].isvalid) {
           struct fs_inode inode;
           inode.size = 0;
@@ -233,43 +247,81 @@ int fs_create()
           for(k = 0; k < POINTERS_PER_INODE; k++) {
             inode.direct[k] = 0;
           }
+
+          // write to disk and return
           inode_save((j+((i-1)*INODES_PER_BLOCK)), &inode);
           return (j+((i-1)*INODES_PER_BLOCK)); 
         }
       }
-    }   
+    } 
+
+    printf("Error: no free inode space\n");  
     return 0;
 }
 
 int fs_delete( int inumber )
 {
+    if(!map){
+        printf("Error: no mounted disk\n");
+        return 0;
+    }
+
+  if(!valid_inumber(inumber) || inumber ==0 ){
+    printf("Error: invalid inumber\n");
+    return 0;
+  }
+
   // access the inode
-  union fs_block block;
   struct fs_inode inode;
   inode_load(inumber, &inode);
 
-  // printf("isvalid %d\n", inode.isvalid); // should be one if the inode exists
+  if(!inode.isvalid){
+    printf("Error: invalid inode\n");
+    return 0;
+  }
 
-  if (inode.isvalid) {
-    // release the data
-    inode.size = 0;
-    inode.isvalid = 0;
-    int k;
-    for(k = 0; k < POINTERS_PER_INODE; k++) {
+  // release the data
+  inode.size = 0;
+  inode.isvalid = 0;
+  int k;
+  for(k = 0; k < POINTERS_PER_INODE; k++) {
+    if(inode.direct[k]) {
+      // free direct blocks on bitmap
+      map[inode.direct[k]] = 0;
       inode.direct[k] = 0;
     }
-    inode.indirect = 0;
+  }
 
-    inode_save(inumber, &inode);
-    // free on the map (ie make available)  
-    map[inumber] = 0; 
-    return 1;
-  } 
-  return 0;
+  if(inode.indirect) {
+    union fs_block block;
+    disk_read(inode.indirect, block.data);
+    int i;
+
+    // free indirect data blocks
+    for(i=0;i<POINTERS_PER_BLOCK;i++)
+      if(block.pointers[i]) 
+        map[block.pointers[i]] = 0;
+
+    inode.indirect = 0;
+  }
+
+  inode_save(inumber, &inode);
+  return 1; 
+
 }
 
 int fs_getsize( int inumber )
 {
+    if(!map){
+        printf("Error: no mounted disk\n");
+        return -1;
+    }
+
+    if(!valid_inumber(inumber)){
+      printf("Error: invalid inumber\n");
+      return -1;
+    }
+
     struct fs_inode inode;
 
     inode_load( inumber, &inode );
@@ -284,10 +336,171 @@ int fs_getsize( int inumber )
 
 int fs_read( int inumber, char *data, int length, int offset )
 {
-    return 0;
+    if(!map){
+        printf("Error: no mounted disk\n");
+        return 0;
+    }
+
+    if(!valid_inumber(inumber)){
+        printf("Error: invalid inumber\n");
+        return 0;
+    }
+
+    int read = 0;
+    union fs_block block;
+
+    // access the inode
+    struct fs_inode inode;
+    inode_load(inumber, &inode);
+    
+    if(!inode.isvalid){
+        printf("Error: invalid inode\n");
+        return 0;
+    }
+
+    // limit length to inode size
+    if( offset > inode.size )
+        return 0;
+    if( length > inode.size-offset )
+        length = inode.size-offset;
+    
+    int i;
+    for(i=0;i<POINTERS_PER_INODE && read < length;i++) {
+        if(inode.direct[i]) {
+            // skip block if offset is big enough
+            if( offset > DISK_BLOCK_SIZE ){
+                offset -= DISK_BLOCK_SIZE;
+                continue;
+            }
+
+            // bytes to read in this iteration
+            int to_read = length-read;
+            // don't read outside of block
+            if( to_read > DISK_BLOCK_SIZE-offset )
+                to_read = DISK_BLOCK_SIZE-offset;
+     
+            // copy memory
+            disk_read(inode.direct[i], block.data);
+            memcpy(data+read, block.data+offset, to_read);
+
+            // offset is 0 after first copy
+            offset = 0;
+            read += to_read;
+        }
+    }
+
+    if( read < length && inode.indirect ) {
+        union fs_block indirect;
+        disk_read(inode.indirect, indirect.data);
+
+        for(i=0;i<POINTERS_PER_BLOCK && read < length;i++) {
+            if(indirect.pointers[i]) {
+                // skip block if offset is big enough
+                if( offset > DISK_BLOCK_SIZE ){
+                    offset -= DISK_BLOCK_SIZE;
+                    continue;
+                }
+
+                int to_read = length-read;
+                if( to_read > DISK_BLOCK_SIZE-offset )
+                    to_read = DISK_BLOCK_SIZE-offset;
+      
+                disk_read(indirect.pointers[i], block.data);
+
+                memcpy(data+read, block.data+offset, to_read);
+                offset = 0;
+                read += to_read;
+            }
+        } 
+    }
+
+    return read;
 }
 
 int fs_write( int inumber, const char *data, int length, int offset )
 {
-    return 0;
+    if(!map){
+        printf("Error: no mounted disk\n");
+        return 0;
+    }
+
+    if(!valid_inumber(inumber)){
+        printf("Error: invalid inumber\n");
+        return 0;
+    }
+
+    int written = 0;
+    union fs_block block;
+
+    // access the inode
+    struct fs_inode inode;
+    inode_load(inumber, &inode);
+    
+    if(!inode.isvalid){
+        printf("Error: invalid inode\n");
+        return 0;
+    }
+
+    // limit length to inode size
+    if( offset > inode.size )
+        return 0;
+    if( length > inode.size-offset )
+        length = inode.size-offset;
+    
+    int i;
+    for(i=0;i<POINTERS_PER_INODE && written < length;i++) {
+        // skip block if offset is big enough
+        if( offset > DISK_BLOCK_SIZE ){
+            offset -= DISK_BLOCK_SIZE;
+            continue;
+        }
+
+        // bytes to read in this iteration
+        int to_write = length-read;
+        // don't read outside of block
+        if( to_write > DISK_BLOCK_SIZE-offset )
+            to_write = DISK_BLOCK_SIZE-offset;
+     
+        // allocate if necessary
+        if( !inode.direct[i] ){
+            int j;
+            for(j=0;j<
+
+        }
+
+        // copy memory
+        disk_read(inode.direct[i], block.data);
+        memcpy(block.data+offset, data+written, to_write);
+
+        // offset is 0 after first copy
+        offset = 0;
+        written += to_write;
+    }
+
+    if( written < length ) {
+        union fs_block indirect;
+        disk_read(inode.indirect, indirect.data);
+
+        for(i=0;i<POINTERS_PER_BLOCK && read < length;i++) {
+            if(indirect.pointers[i]) {
+                // skip block if offset is big enough
+                if( offset > DISK_BLOCK_SIZE ){
+                    offset -= DISK_BLOCK_SIZE;
+                    continue;
+                }
+
+                int to_read = length-read;
+                if( to_read > DISK_BLOCK_SIZE-offset )
+                    to_read = DISK_BLOCK_SIZE-offset;
+      
+                disk_read(indirect.pointers[i], block.data);
+
+                memcpy(data+read, block.data+offset, to_read);
+                offset = 0;
+                read += to_read;
+            }
+        } 
+    }
+
+    return written;
 }
