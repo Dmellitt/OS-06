@@ -75,6 +75,20 @@ int valid_inumber( int inumber )
     return 1;
 }
 
+int free_block(){
+	union fs_block block;
+
+	disk_read(0,block.data); 
+
+    int i;
+    for(i=0;i<block.super.nblocks;i++){
+        if(!map[i])
+            return i;
+    }
+
+    return -1;
+}
+
 int fs_format()
 {
     // check for block bitmap
@@ -364,9 +378,23 @@ int fs_read( int inumber, char *data, int length, int offset )
     if( length > inode.size-offset )
         length = inode.size-offset;
     
+    union fs_block indirect;
     int i;
-    for(i=0;i<POINTERS_PER_INODE && read < length;i++) {
-        if(inode.direct[i]) {
+    for(i=0;i<POINTERS_PER_INODE+POINTERS_PER_BLOCK && read < length;i++) {
+        if(i==POINTERS_PER_INODE){
+            if(inode.indirect)
+                disk_read(inode.indirect, indirect.data);
+            else
+                return read;
+        }
+
+        int pointer;
+        if(i<POINTERS_PER_INODE)
+            pointer = inode.direct[i];
+        else
+            pointer = indirect.pointers[i-POINTERS_PER_INODE];
+
+        if(pointer) {
             // skip block if offset is big enough
             if( offset > DISK_BLOCK_SIZE ){
                 offset -= DISK_BLOCK_SIZE;
@@ -380,38 +408,13 @@ int fs_read( int inumber, char *data, int length, int offset )
                 to_read = DISK_BLOCK_SIZE-offset;
      
             // copy memory
-            disk_read(inode.direct[i], block.data);
+            disk_read(pointer, block.data);
             memcpy(data+read, block.data+offset, to_read);
 
             // offset is 0 after first copy
             offset = 0;
             read += to_read;
         }
-    }
-
-    if( read < length && inode.indirect ) {
-        union fs_block indirect;
-        disk_read(inode.indirect, indirect.data);
-
-        for(i=0;i<POINTERS_PER_BLOCK && read < length;i++) {
-            if(indirect.pointers[i]) {
-                // skip block if offset is big enough
-                if( offset > DISK_BLOCK_SIZE ){
-                    offset -= DISK_BLOCK_SIZE;
-                    continue;
-                }
-
-                int to_read = length-read;
-                if( to_read > DISK_BLOCK_SIZE-offset )
-                    to_read = DISK_BLOCK_SIZE-offset;
-      
-                disk_read(indirect.pointers[i], block.data);
-
-                memcpy(data+read, block.data+offset, to_read);
-                offset = 0;
-                read += to_read;
-            }
-        } 
     }
 
     return read;
@@ -441,14 +444,45 @@ int fs_write( int inumber, const char *data, int length, int offset )
         return 0;
     }
 
+    int max = (POINTERS_PER_INODE+POINTERS_PER_BLOCK)*DISK_BLOCK_SIZE;
     // limit length to inode size
-    if( offset > inode.size )
+    if( offset > max )
         return 0;
-    if( length > inode.size-offset )
-        length = inode.size-offset;
+    if( length > max-offset )
+        length = max-offset;
     
+    union fs_block indirect;
     int i;
-    for(i=0;i<POINTERS_PER_INODE && written < length;i++) {
+    for(i=0;i<POINTERS_PER_INODE+POINTERS_PER_BLOCK && written < length;i++) {
+        if(i==POINTERS_PER_INODE){
+            if(inode.indirect)
+                // existing pointer block
+                disk_read(inode.indirect, indirect.data);
+            else{
+                int free_index = free_block();
+                
+                // no free blocks
+                if(free_index==-1)
+                    return written;
+
+                // allocate pointer block                
+                inode.indirect=free_index;
+                map[free_index]=1;
+                int j;
+                for(j=0;j<DISK_BLOCK_SIZE;j++)
+                    block.data[j]=0;
+
+                disk_write(inode.indirect, block.data);
+                disk_read(inode.indirect, indirect.data);
+            }
+        }
+
+        int pointer;
+        if(i<POINTERS_PER_INODE)
+            pointer = inode.direct[i];
+        else
+            pointer = indirect.pointers[i-POINTERS_PER_INODE];
+
         // skip block if offset is big enough
         if( offset > DISK_BLOCK_SIZE ){
             offset -= DISK_BLOCK_SIZE;
@@ -456,50 +490,51 @@ int fs_write( int inumber, const char *data, int length, int offset )
         }
 
         // bytes to read in this iteration
-        int to_write = length-read;
+        int to_write = length-written;
+
         // don't read outside of block
         if( to_write > DISK_BLOCK_SIZE-offset )
             to_write = DISK_BLOCK_SIZE-offset;
      
         // allocate if necessary
-        if( !inode.direct[i] ){
-            int j;
-            for(j=0;j<
+        if( !pointer ){
+            int free_index = free_block();
 
+            if(free_index==-1)
+                return written;
+        
+            pointer = free_index;
+            map[free_index]=1;
+
+            // update inode pointers
+            if(i<POINTERS_PER_INODE)
+                inode.direct[i] = pointer;
+            else{
+                indirect.pointers[i-POINTERS_PER_INODE] = pointer;
+                disk_write(inode.indirect, indirect.data); 
+            }
+
+            int j;
+            for(j=0;j<DISK_BLOCK_SIZE;j++)
+                block.data[j]=0;    
+        }
+        else {
+            // copy memory
+            disk_read(pointer, block.data);
         }
 
-        // copy memory
-        disk_read(inode.direct[i], block.data);
+        // save inode to disk
+        inode.size+=to_write;
+        inode_save(inumber, &inode);
+
+        // write data
         memcpy(block.data+offset, data+written, to_write);
+        disk_write(pointer, block.data);
+        
 
         // offset is 0 after first copy
         offset = 0;
         written += to_write;
-    }
-
-    if( written < length ) {
-        union fs_block indirect;
-        disk_read(inode.indirect, indirect.data);
-
-        for(i=0;i<POINTERS_PER_BLOCK && read < length;i++) {
-            if(indirect.pointers[i]) {
-                // skip block if offset is big enough
-                if( offset > DISK_BLOCK_SIZE ){
-                    offset -= DISK_BLOCK_SIZE;
-                    continue;
-                }
-
-                int to_read = length-read;
-                if( to_read > DISK_BLOCK_SIZE-offset )
-                    to_read = DISK_BLOCK_SIZE-offset;
-      
-                disk_read(indirect.pointers[i], block.data);
-
-                memcpy(data+read, block.data+offset, to_read);
-                offset = 0;
-                read += to_read;
-            }
-        } 
     }
 
     return written;
